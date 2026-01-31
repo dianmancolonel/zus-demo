@@ -5,6 +5,17 @@
       <button @click="toggleWireframe" class="control-btn">
         {{ wireframeMode ? '实体模式' : '线框模式' }}
       </button>
+      <button @click="loadSingleModelFromBackend" class="control-btn">
+        加载单个模型
+      </button>
+      <button @click="loadComponentsFromBackend" class="control-btn">
+        加载组件组合
+      </button>
+    </div>
+    <div v-if="selectedComponent" class="component-info">
+      <h3>{{ selectedComponent.name }}</h3>
+      <p>{{ selectedComponent.description }}</p>
+      <img v-if="selectedComponent.image_paths && selectedComponent.image_paths.length" :src="apiService.getStaticUrl(selectedComponent.image_paths[0])" alt="组件图片">
     </div>
   </div>
 </template>
@@ -13,10 +24,13 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import apiService from '../services/apiService';
 
 // Refs
 const containerRef = ref(null);
 const wireframeMode = ref(false);
+const selectedComponent = ref(null);
 
 // Three.js objects
 let scene = null;
@@ -25,6 +39,9 @@ let renderer = null;
 let controls = null;
 let buildingGroup = null;
 let animationId = null;
+let raycaster = null;
+let mouse = null;
+let model = null;
 
 // Initialize Three.js scene
 const initScene = () => {
@@ -116,8 +133,15 @@ const initScene = () => {
   controls.minDistance = 5;
   controls.maxDistance = 50;
   
+  // Initialize raycaster and mouse for component selection
+  raycaster = new THREE.Raycaster();
+  mouse = new THREE.Vector2();
+  
   // Handle window resize
   window.addEventListener('resize', handleResize);
+  
+  // Add mouse click event for component selection
+  window.addEventListener('click', handleMouseClick);
   
   // Add resize observer for container changes
   if (window.ResizeObserver) {
@@ -181,75 +205,7 @@ const clearBuilding = () => {
   scene.add(buildingGroup);
 };
 
-// Generate building based on parameters
-const generateBuilding = (params) => {
-  clearBuilding();
-  
-  if (!params) return;
-  
-  console.log('Generating building with params:', params);
-  
-  // Extract parameters
-  const {
-    bay_count = 3,
-    roof_type = 'gable',
-    roof_level = 'common',
-    color_scheme = 'red_black',
-    symmetry = false,
-    platform_height = 1,
-    platform_size_x = 8,
-    platform_size_z = 6,
-    column_height = 4,
-    column_radius = 0.3
-  } = params;
-  
-  // Create platform/base
-  const platformGeometry = new THREE.BoxGeometry(platform_size_x, platform_height, platform_size_z);
-  const platformMaterial = new THREE.MeshStandardMaterial({ 
-    color: getPlatformColor(color_scheme),
-    roughness: 0.7,
-    metalness: 0.3
-  });
-  const platform = new THREE.Mesh(platformGeometry, platformMaterial);
-  platform.position.y = platform_height / 2;
-  platform.castShadow = true;
-  platform.receiveShadow = true;
-  buildingGroup.add(platform);
-  
-  // Calculate spacing
-  const spacingX = platform_size_x / (bay_count + 1);
-  
-  // Create columns based on bay_count
-  // Front row columns
-  for (let i = 0; i < bay_count; i++) {
-    const xPos = -(platform_size_x / 2) + (i + 1) * spacingX;
-    createColumn(xPos, platform_size_z / 2, column_height, column_radius, color_scheme);
-  }
-  
-  // Back row columns
-  for (let i = 0; i < bay_count; i++) {
-    const xPos = -(platform_size_x / 2) + (i + 1) * spacingX;
-    createColumn(xPos, -platform_size_z / 2, column_height, column_radius, color_scheme);
-  }
-  
-  // Side columns if needed (for deeper structures)
-  if (bay_count > 3) {
-    for (let i = 1; i < bay_count - 1; i++) {
-      const zPos = -(platform_size_z / 2) + i * (platform_size_z / (bay_count - 1));
-      createColumn(-(platform_size_x / 2) + spacingX, zPos, column_height, column_radius, color_scheme);
-      createColumn((platform_size_x / 2) - spacingX, zPos, column_height, column_radius, color_scheme);
-    }
-  }
-  
-  // Create walls between columns
-  createWalls(bay_count, platform_size_x, platform_size_z, column_height, platform_height, color_scheme);
-  
-  // Create roof based on type
-  createRoof(roof_type, platform_size_x, platform_size_z, column_height, roof_level, color_scheme);
-  
-  // Add to scene
-  scene.add(buildingGroup);
-};
+
 
 // Helper to get platform color based on scheme
 const getPlatformColor = (scheme) => {
@@ -426,7 +382,7 @@ const createRoof = (type, width, depth, height, level, scheme) => {
   const roof = new THREE.Mesh(roofGeometry, roofMaterial);
   
   // Calculate roof position based on type
-  const platformHeight = 1; // Same as platform height in generateBuilding
+  const platformHeight = 1;
   const roofYPosition = height + platformHeight + (type === 'arch' ? height * 0.2 : height * 0.3);
   roof.position.y = roofYPosition;
   
@@ -474,6 +430,251 @@ const toggleWireframe = () => {
   }
 };
 
+// 3D 模型物体名称与后端组件 ID 的映射关系
+const objectComponentMap = {
+  'roof': 'roof_wudian',
+  'pillar': 'pillar_jinsinan',
+  'door': 'door_royal',
+  'wall': 'wall_brick',
+  'platform': 'platform_stone'
+};
+
+// 获取物体的有效名称（递归查找父对象）
+const getObjectName = (object) => {
+  if (object.name && object.name.trim() !== '') {
+    return object.name;
+  }
+  if (object.parent && object.parent !== scene) {
+    return getObjectName(object.parent);
+  }
+  return null;
+};
+
+// Handle mouse click for component selection
+const handleMouseClick = (event) => {
+  if (!containerRef.value) return;
+  
+  // Calculate mouse position in normalized device coordinates
+  const rect = containerRef.value.getBoundingClientRect();
+  mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  
+  console.log('Mouse position:', mouse);
+  
+  // Update the ray with the camera and mouse position
+  raycaster.setFromCamera(mouse, camera);
+  
+  // Calculate objects intersecting the ray
+  const intersects = raycaster.intersectObjects(scene.children, true);
+  
+  console.log('Number of intersects:', intersects.length);
+  
+  if (intersects.length > 0) {
+    const clickedObject = intersects[0].object;
+    console.log('Clicked raw object:', clickedObject);
+    console.log('Clicked object name:', clickedObject.name);
+    console.log('Clicked object type:', clickedObject.type);
+    console.log('Clicked object parent:', clickedObject.parent ? clickedObject.parent.name : 'null');
+    
+    // 获取物体的有效名称
+    const objectName = getObjectName(clickedObject);
+    console.log('Resolved object name:', objectName);
+    
+    // 调试：打印整个相交对象数组
+    console.log('All intersects:', intersects.map(i => ({
+      name: i.object.name,
+      type: i.object.type,
+      parent: i.object.parent ? i.object.parent.name : 'null',
+      distance: i.distance
+    })));
+    
+    // 根据物体名称获取组件 ID
+    let componentId = 'roof'; // 默认组件
+    
+    if (objectName) {
+      // 尝试直接映射
+      if (objectComponentMap[objectName]) {
+        console.log('Direct mapping found for object name:', objectName);
+        componentId = objectComponentMap[objectName];
+      } else {
+          console.log('No mapping found for object name:', objectName);
+        }
+    }
+    console.log('Selected component ID:', componentId);
+    // 加载对应的组件信息
+    loadComponentInfo(componentId);
+  } else {
+    console.log('No objects intersected');
+    console.log('Scene children count:', scene.children.length);
+    console.log('Scene children:', scene.children.map(child => ({
+      name: child.name,
+      type: child.type,
+      children: child.children ? child.children.length : 0
+    })));
+  }
+};
+
+// Load component info from backend
+const loadComponentInfo = async (componentId) => {
+  try {
+    const component = await apiService.getComponentById(componentId);
+    if (component) {
+      selectedComponent.value = component;
+      console.log('Loaded component info:', component);
+    }
+  } catch (error) {
+    console.error('Error loading component info:', error);
+  }
+};
+
+// Load model from backend (single model)
+const loadSingleModelFromBackend = async () => {
+  try {
+    // Get buildings from backend
+    const buildings = await apiService.getBuildings();
+    if (buildings && buildings.length > 0) {
+      const building = buildings[0];
+      console.log('Loading model for building:', building.name);
+      
+      // Get model URL
+      const modelUrl = apiService.getStaticUrl(building.model_path);
+      console.log('Model URL:', modelUrl);
+      
+      // Load model using GLTFLoader
+      const loader = new GLTFLoader();
+      loader.load(
+        modelUrl,
+        (gltf) => {
+          console.log('Model loaded successfully:', gltf);
+          
+          // Clear existing building
+          clearBuilding();
+          
+          // Add loaded model to scene
+          model = gltf.scene;
+          model.position.set(0, 0, 0);
+          model.scale.set(1, 1, 1);
+          buildingGroup.add(model);
+          
+          console.log('Model added to scene');
+        },
+        (xhr) => {
+          console.log((xhr.loaded / xhr.total * 100) + '% loaded');
+        },
+        (error) => {
+          console.error('Error loading model:', error);
+        }
+      );
+    }
+  } catch (error) {
+    console.error('Error loading model from backend:', error);
+  }
+};
+
+// Load components from backend and assemble building
+const loadComponentsFromBackend = async () => {
+  try {
+    console.log('Loading components from backend...');
+    
+    // Get buildings from backend
+    const buildings = await apiService.getBuildings();
+    if (!buildings || buildings.length === 0) {
+      console.error('No buildings found');
+      return;
+    }
+    
+    const building = buildings[0];
+    console.log('Loading components for building:', building.name);
+    
+    // Clear existing building
+    clearBuilding();
+    
+    // Get components for this building
+    const components = await apiService.getComponents(building.id);
+    console.log('Found components:', components.map(c => c.name));
+    
+    if (!components || components.length === 0) {
+      console.error('No components found for this building');
+      return;
+    }
+    
+    // Load each component model
+    let loadedComponents = 0;
+    const totalComponents = components.length;
+    
+    components.forEach((component) => {
+      if (component.model_path) {
+        const modelUrl = apiService.getStaticUrl(component.model_path);
+        console.log(`Loading component model: ${component.name} (${modelUrl})`);
+        
+        const loader = new GLTFLoader();
+        loader.load(
+          modelUrl,
+          (gltf) => {
+            console.log(`Component ${component.name} loaded successfully`);
+            
+            // Add component model to building group
+            const componentModel = gltf.scene;
+            
+            // Set position
+            if (component.position) {
+              componentModel.position.set(
+                component.position.x || 0,
+                component.position.y || 0,
+                component.position.z || 0
+              );
+            } else {
+              componentModel.position.set(0, 0, 0);
+            }
+            
+            // Set rotation
+            if (component.rotation) {
+              componentModel.rotation.set(
+                component.rotation.x || 0,
+                component.rotation.y || 0,
+                component.rotation.z || 0
+              );
+            }
+            
+            // Set scale
+            if (component.scale) {
+              componentModel.scale.set(
+                component.scale.x || 1,
+                component.scale.y || 1,
+                component.scale.z || 1
+              );
+            }
+            
+            // Add to building group
+            buildingGroup.add(componentModel);
+            
+            // Track loading progress
+            loadedComponents++;
+            console.log(`Loaded ${loadedComponents}/${totalComponents} components`);
+            
+            if (loadedComponents === totalComponents) {
+              console.log('All components loaded successfully');
+            }
+          },
+          (xhr) => {
+            console.log(`${component.name}: ${(xhr.loaded / xhr.total * 100)}% loaded`);
+          },
+          (error) => {
+            console.error(`Error loading component ${component.name}:`, error);
+            loadedComponents++;
+          }
+        );
+      } else {
+        console.warn(`Component ${component.name} has no model_path`);
+        loadedComponents++;
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error loading components from backend:', error);
+  }
+};
+
 // Cleanup
 const cleanup = () => {
   if (animationId) {
@@ -481,6 +682,7 @@ const cleanup = () => {
   }
   
   window.removeEventListener('resize', handleResize);
+  window.removeEventListener('click', handleMouseClick);
   
   if (controls) {
     controls.dispose();
@@ -506,10 +708,23 @@ const cleanup = () => {
   }
 };
 
+// Reset view to initial state
+const resetView = () => {
+  if (camera) {
+    camera.position.set(20, 20, 20);
+    camera.lookAt(0, 0, 0);
+  }
+  if (controls) {
+    controls.reset();
+  }
+};
+
 // Expose methods to parent component
 defineExpose({
-  generateBuilding,
-  clearBuilding
+  loadSingleModelFromBackend,
+  loadComponentsFromBackend,
+  clearBuilding,
+  resetView
 });
 
 onMounted(() => {
@@ -568,6 +783,43 @@ onUnmounted(() => {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
+/* Component info panel */
+.component-info {
+  position: absolute;
+  bottom: 20px;
+  left: 20px;
+  width: 300px;
+  max-width: 80%;
+  background-color: rgba(255, 255, 255, 0.95);
+  border-radius: 8px;
+  padding: 15px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  backdrop-filter: blur(10px);
+  z-index: 10;
+}
+
+.component-info h3 {
+  margin-top: 0;
+  margin-bottom: 10px;
+  color: #2c3e50;
+  font-size: 16px;
+}
+
+.component-info p {
+  margin: 0 0 15px 0;
+  color: #34495e;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.component-info img {
+  width: 100%;
+  max-height: 150px;
+  object-fit: cover;
+  border-radius: 4px;
+  margin-top: 10px;
+}
+
 /* Mobile responsive adjustments */
 @media (max-width: 768px) {
   .viewer-controls {
@@ -578,6 +830,22 @@ onUnmounted(() => {
   .control-btn {
     padding: 6px 12px;
     font-size: 12px;
+  }
+  
+  .component-info {
+    width: 90%;
+    max-width: none;
+    left: 5%;
+    bottom: 10px;
+    padding: 12px;
+  }
+  
+  .component-info h3 {
+    font-size: 14px;
+  }
+  
+  .component-info p {
+    font-size: 13px;
   }
 }
 </style>
