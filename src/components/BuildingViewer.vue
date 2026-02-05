@@ -11,6 +11,75 @@
       <button @click="loadComponentsFromBackend" class="control-btn">
         加载组件组合
       </button>
+      <button @click="loadTestModel" class="control-btn">
+        加载测试模型
+      </button>
+    </div>
+    <div class="lighting-controls">
+      <h4>光照控制</h4>
+      <div class="control-group">
+        <label>环境光强度: {{ lightingControls.ambientIntensity.toFixed(2) }}</label>
+        <input 
+          type="range" 
+          min="0" 
+          max="1" 
+          step="0.1" 
+          v-model.number="lightingControls.ambientIntensity"
+          @input="updateLighting"
+        >
+      </div>
+      <div class="control-group">
+        <label>方向光强度: {{ lightingControls.directionalIntensity.toFixed(2) }}</label>
+        <input 
+          type="range" 
+          min="0" 
+          max="2" 
+          step="0.1" 
+          v-model.number="lightingControls.directionalIntensity"
+          @input="updateLighting"
+        >
+      </div>
+      <div class="control-group">
+        <label>方向光 X: {{ lightingControls.directionalX }}</label>
+        <input 
+          type="range" 
+          min="-50" 
+          max="50" 
+          step="1" 
+          v-model.number="lightingControls.directionalX"
+          @input="updateLighting"
+        >
+      </div>
+      <div class="control-group">
+        <label>方向光 Y: {{ lightingControls.directionalY }}</label>
+        <input 
+          type="range" 
+          min="0" 
+          max="50" 
+          step="1" 
+          v-model.number="lightingControls.directionalY"
+          @input="updateLighting"
+        >
+      </div>
+      <div class="control-group">
+        <label>方向光 Z: {{ lightingControls.directionalZ }}</label>
+        <input 
+          type="range" 
+          min="-50" 
+          max="50" 
+          step="1" 
+          v-model.number="lightingControls.directionalZ"
+          @input="updateLighting"
+        >
+      </div>
+      <div class="control-group">
+        <label>启用阴影: {{ lightingControls.shadowsEnabled ? '是' : '否' }}</label>
+        <input 
+          type="checkbox" 
+          v-model="lightingControls.shadowsEnabled"
+          @change="updateShadows"
+        >
+      </div>
     </div>
     <div v-if="selectedComponent" class="component-info">
       <h3>{{ selectedComponent.name }}</h3>
@@ -21,16 +90,28 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, reactive, onMounted, onUnmounted } from 'vue';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
+import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import apiService from '../services/apiService';
 
 // Refs
 const containerRef = ref(null);
 const wireframeMode = ref(false);
 const selectedComponent = ref(null);
+
+// Lighting controls
+const lightingControls = reactive({
+  ambientIntensity: 0.6,
+  directionalIntensity: 0.8,
+  directionalX: 10,
+  directionalY: 20,
+  directionalZ: 15,
+  shadowsEnabled: true
+});
 
 // Three.js objects
 let scene = null;
@@ -42,6 +123,8 @@ let animationId = null;
 let raycaster = null;
 let mouse = null;
 let model = null;
+let ambientLight = null;
+let directionalLight = null;
 
 // Initialize Three.js scene
 const initScene = () => {
@@ -95,15 +178,21 @@ const initScene = () => {
   console.log('Renderer DOM element:', renderer.domElement);
   
   // Add lighting
-  const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+  ambientLight = new THREE.AmbientLight(0xffffff, lightingControls.ambientIntensity);
   scene.add(ambientLight);
   
-  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-  directionalLight.position.set(10, 20, 15);
+  directionalLight = new THREE.DirectionalLight(0xffffff, lightingControls.directionalIntensity);
+  directionalLight.position.set(
+    lightingControls.directionalX,
+    lightingControls.directionalY,
+    lightingControls.directionalZ
+  );
   directionalLight.castShadow = true;
   directionalLight.shadow.mapSize.width = 2048;
   directionalLight.shadow.mapSize.height = 2048;
   scene.add(directionalLight);
+
+  
   
   // Add ground
   const groundGeometry = new THREE.PlaneGeometry(50, 50);
@@ -527,6 +616,87 @@ const loadComponentInfo = async (componentId) => {
   }
 };
 
+// Load test model from public/objtest folder
+const loadTestModel = async () => {
+  try {
+    console.log('Loading test model from public/objtest...');
+    
+    // Clear existing building
+    clearBuilding();
+    
+    // Test model path (from public folder)
+    const modelUrl = '/objtest/p123.glb';
+    console.log(`Loading test model: ${modelUrl}`);
+    
+    // Determine loader based on file extension
+    const extension = modelUrl.split('.').pop().toLowerCase();
+    let loader;
+    
+    if (extension === 'glb' || extension === 'gltf') {
+      loader = new GLTFLoader();
+    } else if (extension === 'fbx') {
+      loader = new FBXLoader();
+    } else if (extension === 'obj') {
+      loader = new OBJLoader();
+    } else {
+      console.error('Unsupported model format:', extension);
+      return;
+    }
+    
+    loader.load(
+      modelUrl,
+      (model) => {
+        console.log('Test model loaded successfully');
+        
+        // Handle different loader results
+        let modelObject;
+        if (model.scene) {
+          // GLTFLoader returns an object with scene property
+          modelObject = model.scene;
+        } else {
+          // FBXLoader and OBJLoader return the object directly
+          modelObject = model;
+        }
+        
+        // Adjust model to respond to lighting
+        modelObject.traverse((child) => {
+          if (child.isMesh) {
+            // Ensure mesh uses MeshStandardMaterial for proper lighting response
+            if (!(child.material instanceof THREE.MeshStandardMaterial)) {
+              // Convert to MeshStandardMaterial
+              const newMaterial = new THREE.MeshStandardMaterial({
+                color: child.material.color || 0xaaaaaa,
+                map: child.material.map,
+                roughness: 0.5,
+                metalness: 0.2
+              });
+              child.material = newMaterial;
+            }
+            // Enable shadow casting and receiving
+            child.castShadow = true;
+            child.receiveShadow = true;
+          }
+        });
+        
+        // Scale and position the model appropriately
+        modelObject.scale.set(1, 1, 1); // Adjust scale as needed
+        modelObject.position.set(0, 0.5, 0); // Center at origin
+        
+        buildingGroup.add(modelObject);
+        console.log('Test model added to scene');
+      },
+      (xhr) => {
+        console.log(`Loading test model: ${Math.round((xhr.loaded / xhr.total) * 100)}%`);
+      },
+      (error) => {
+        console.error('Error loading test model:', error);
+      }
+    );
+  } catch (error) {
+    console.error('Error loading test model:', error);
+  }
+};
+
 // Load model from backend (single model)
 const loadSingleModelFromBackend = async () => {
   try {
@@ -540,18 +710,61 @@ const loadSingleModelFromBackend = async () => {
       const modelUrl = apiService.getStaticUrl(building.model_path);
       console.log('Model URL:', modelUrl);
       
-      // Load model using GLTFLoader
-      const loader = new GLTFLoader();
+      // Determine loader based on file extension
+      const extension = modelUrl.split('.').pop().toLowerCase();
+      let loader;
+      
+      if (extension === 'glb' || extension === 'gltf') {
+        loader = new GLTFLoader();
+      } else if (extension === 'fbx') {
+        loader = new FBXLoader();
+      } else if (extension === 'obj') {
+        loader = new OBJLoader();
+      } else {
+        console.error('Unsupported model format:', extension);
+        return;
+      }
+      
       loader.load(
         modelUrl,
-        (gltf) => {
-          console.log('Model loaded successfully:', gltf);
+        (loadedModel) => {
+          console.log('Model loaded successfully:', loadedModel);
           
           // Clear existing building
           clearBuilding();
           
+          // Handle different loader results
+          let modelObject;
+          if (loadedModel.scene) {
+            // GLTFLoader returns an object with scene property
+            modelObject = loadedModel.scene;
+          } else {
+            // FBXLoader and OBJLoader return the object directly
+            modelObject = loadedModel;
+          }
+          
+          // Adjust model to respond to lighting
+          modelObject.traverse((child) => {
+            if (child.isMesh) {
+              // Ensure mesh uses MeshStandardMaterial for proper lighting response
+              if (!(child.material instanceof THREE.MeshStandardMaterial)) {
+                // Convert to MeshStandardMaterial
+                const newMaterial = new THREE.MeshStandardMaterial({
+                  color: child.material.color || 0xaaaaaa,
+                  map: child.material.map,
+                  roughness: 0.5,
+                  metalness: 0.2
+                });
+                child.material = newMaterial;
+              }
+              // Enable shadow casting and receiving
+              child.castShadow = true;
+              child.receiveShadow = true;
+            }
+          });
+          
           // Add loaded model to scene
-          model = gltf.scene;
+          model = modelObject;
           model.position.set(0, 0, 0);
           model.scale.set(1, 1, 1);
           buildingGroup.add(model);
@@ -607,14 +820,36 @@ const loadComponentsFromBackend = async () => {
         const modelUrl = apiService.getStaticUrl(component.model_path);
         console.log(`Loading component model: ${component.name} (${modelUrl})`);
         
-        const loader = new GLTFLoader();
+        // Determine loader based on file extension
+        const extension = modelUrl.split('.').pop().toLowerCase();
+        let loader;
+        
+        if (extension === 'glb' || extension === 'gltf') {
+          loader = new GLTFLoader();
+        } else if (extension === 'fbx') {
+          loader = new FBXLoader();
+        } else if (extension === 'obj') {
+          loader = new OBJLoader();
+        } else {
+          console.error('Unsupported model format:', extension);
+          loadedComponents++;
+          return;
+        }
+        
         loader.load(
           modelUrl,
-          (gltf) => {
+          (loadedModel) => {
             console.log(`Component ${component.name} loaded successfully`);
             
-            // Add component model to building group
-            const componentModel = gltf.scene;
+            // Handle different loader results
+            let componentModel;
+            if (loadedModel.scene) {
+              // GLTFLoader returns an object with scene property
+              componentModel = loadedModel.scene;
+            } else {
+              // FBXLoader and OBJLoader return the object directly
+              componentModel = loadedModel;
+            }
             
             // Set position
             if (component.position) {
@@ -644,6 +879,26 @@ const loadComponentsFromBackend = async () => {
                 component.scale.z || 1
               );
             }
+            
+            // Adjust model to respond to lighting
+            componentModel.traverse((child) => {
+              if (child.isMesh) {
+                // Ensure mesh uses MeshStandardMaterial for proper lighting response
+                if (!(child.material instanceof THREE.MeshStandardMaterial)) {
+                  // Convert to MeshStandardMaterial
+                  const newMaterial = new THREE.MeshStandardMaterial({
+                    color: child.material.color || 0xaaaaaa,
+                    map: child.material.map,
+                    roughness: 0.5,
+                    metalness: 0.2
+                  });
+                  child.material = newMaterial;
+                }
+                // Enable shadow casting and receiving
+                child.castShadow = true;
+                child.receiveShadow = true;
+              }
+            });
             
             // Add to building group
             buildingGroup.add(componentModel);
@@ -719,10 +974,45 @@ const resetView = () => {
   }
 };
 
+// Update lighting based on controls
+const updateLighting = () => {
+  if (ambientLight) {
+    ambientLight.intensity = lightingControls.ambientIntensity;
+  }
+  if (directionalLight) {
+    directionalLight.intensity = lightingControls.directionalIntensity;
+    directionalLight.position.set(
+      lightingControls.directionalX,
+      lightingControls.directionalY,
+      lightingControls.directionalZ
+    );
+  }
+};
+
+// Update shadows based on controls
+const updateShadows = () => {
+  if (renderer) {
+    renderer.shadowMap.enabled = lightingControls.shadowsEnabled;
+  }
+  if (directionalLight) {
+    directionalLight.castShadow = lightingControls.shadowsEnabled;
+  }
+  // Update all objects in the scene
+  if (scene) {
+    scene.traverse((child) => {
+      if (child.isMesh) {
+        child.castShadow = lightingControls.shadowsEnabled;
+        child.receiveShadow = lightingControls.shadowsEnabled;
+      }
+    });
+  }
+};
+
 // Expose methods to parent component
 defineExpose({
   loadSingleModelFromBackend,
   loadComponentsFromBackend,
+  loadTestModel,
   clearBuilding,
   resetView
 });
@@ -818,6 +1108,45 @@ onUnmounted(() => {
   object-fit: cover;
   border-radius: 4px;
   margin-top: 10px;
+}
+
+/* Lighting controls panel */
+.lighting-controls {
+  position: absolute;
+  top: 80px;
+  right: 20px;
+  width: 300px;
+  max-width: 80%;
+  background-color: rgba(255, 255, 255, 0.95);
+  border-radius: 8px;
+  padding: 15px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  backdrop-filter: blur(10px);
+  z-index: 10;
+}
+
+.lighting-controls h4 {
+  margin-top: 0;
+  margin-bottom: 15px;
+  color: #2c3e50;
+  font-size: 16px;
+}
+
+.control-group {
+  margin-bottom: 12px;
+}
+
+.control-group label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 14px;
+  color: #34495e;
+}
+
+.control-group input[type="range"] {
+  width: 100%;
+  margin: 0;
+  accent-color: #3498db;
 }
 
 /* Mobile responsive adjustments */
