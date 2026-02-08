@@ -105,7 +105,7 @@ const selectedComponent = ref(null);
 
 // Lighting controls
 const lightingControls = reactive({
-  ambientIntensity: 0.6,
+  ambientIntensity: 0.5,
   directionalIntensity: 0.8,
   directionalX: 10,
   directionalY: 20,
@@ -187,12 +187,27 @@ const initScene = () => {
     lightingControls.directionalY,
     lightingControls.directionalZ
   );
-  directionalLight.castShadow = true;
-  directionalLight.shadow.mapSize.width = 2048;
-  directionalLight.shadow.mapSize.height = 2048;
+  directionalLight.castShadow = lightingControls.shadowsEnabled;
+  directionalLight.shadow.mapSize.width = 4096;
+  directionalLight.shadow.mapSize.height = 4096;
+  // Configure shadow camera to cover the entire scene
+  directionalLight.shadow.camera.left = -50;
+  directionalLight.shadow.camera.right = 50;
+  directionalLight.shadow.camera.top = 50;
+  directionalLight.shadow.camera.bottom = -50;
+  directionalLight.shadow.camera.near = 0.5;
+  directionalLight.shadow.camera.far = 150;
+  // Add shadow bias to prevent shadow acne (stripes)
+  directionalLight.shadow.bias = -0.0001;
+  // Add shadow radius for softer shadows
+  directionalLight.shadow.radius = 2;
   scene.add(directionalLight);
 
-  
+  const directionalLightHelper = new THREE.DirectionalLightHelper(directionalLight, 5);
+  // Ensure helper doesn't cast shadows
+  directionalLightHelper.castShadow = false;
+  directionalLightHelper.receiveShadow = false;
+  scene.add(directionalLightHelper);
   
   // Add ground
   const groundGeometry = new THREE.PlaneGeometry(50, 50);
@@ -679,8 +694,8 @@ const loadTestModel = async () => {
         });
         
         // Scale and position the model appropriately
-        modelObject.scale.set(1, 1, 1); // Adjust scale as needed
-        modelObject.position.set(0, 0.5, 0); // Center at origin
+        modelObject.scale.set(0.5, 0.5, 0.5); // Adjust scale as needed
+        modelObject.position.set(0, 1.0, 0); // Center at origin
         
         buildingGroup.add(modelObject);
         console.log('Test model added to scene');
@@ -986,6 +1001,9 @@ const updateLighting = () => {
       lightingControls.directionalY,
       lightingControls.directionalZ
     );
+    // Ensure directional light always points to origin
+    directionalLight.target.position.set(0, 0, 0);
+    directionalLight.target.updateMatrixWorld();
   }
 };
 
